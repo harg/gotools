@@ -224,6 +224,9 @@ type Interface interface {
 	// to avoid conflicts with other counters gopls collects.
 	AddTelemetryCounters(context.Context, AddTelemetryCountersArgs) error
 
+	// AddTest: add a test for the selected function
+	AddTest(context.Context, protocol.Location) (*protocol.WorkspaceEdit, error)
+
 	// MaybePromptForTelemetry: Prompt user to enable telemetry
 	//
 	// Checks for the right conditions, and then prompts the user
@@ -503,23 +506,15 @@ type VulncheckArgs struct {
 type RunVulncheckResult struct {
 	// Token holds the progress token for LSP workDone reporting of the vulncheck
 	// invocation.
+	//
+	// Deprecated: previously, this was used as a signal to retrieve the result
+	// using gopls.fetch_vulncheck_result. Clients should ignore this field:
+	// gopls.vulncheck now runs synchronously, and returns a result in the Result
+	// field.
 	Token protocol.ProgressToken
-}
 
-// CallStack models a trace of function calls starting
-// with a client function or method and ending with a
-// call to a vulnerable symbol.
-type CallStack []StackEntry
-
-// StackEntry models an element of a call stack.
-type StackEntry struct {
-	// See golang.org/x/exp/vulncheck.StackEntry.
-
-	// User-friendly representation of function/method names.
-	// e.g. package.funcName, package.(recvType).methodName, ...
-	Name string
-	URI  protocol.DocumentURI
-	Pos  protocol.Position // Start position. (0-based. Column is always 0)
+	// Result holds the result of running vulncheck.
+	Result *vulncheck.Result
 }
 
 // MemStatsResult holds selected fields from runtime.MemStats.

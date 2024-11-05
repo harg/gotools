@@ -324,8 +324,8 @@ func main() {
 			}
 
 			if prev := claimedBy[id]; prev != nil && prev != issue {
-				log.Printf("stack %s is claimed by issues #%d and #%d",
-					id, prev.Number, issue.Number)
+				log.Printf("stack %s is claimed by issues #%d and #%d:%s",
+					id, prev.Number, issue.Number, strings.ReplaceAll("\n"+stack, "\n", "\n- "))
 				continue
 			}
 			if false {
@@ -788,7 +788,13 @@ func readPCLineTable(info Info) (map[string]FileLine, error) {
 	// shallow-cloning just the desired revision.
 	// (Skip if it's already cloned.)
 	revDir := filepath.Join(stacksDir, info.Version)
-	if !fileExists(revDir) {
+	if !fileExists(filepath.Join(revDir, "go.mod")) {
+		// We check for presence of the go.mod file,
+		// not just the directory itself, as the /tmp reaper
+		// often removes stale files before removing their directories.
+		// Remove those stale directories now.
+		_ = os.RemoveAll(revDir) // ignore errors
+
 		log.Printf("cloning tools@gopls/%s", info.Version)
 		if err := shallowClone(revDir, "https://go.googlesource.com/tools", "gopls/"+info.Version); err != nil {
 			_ = os.RemoveAll(revDir) // ignore errors

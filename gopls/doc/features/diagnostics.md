@@ -11,7 +11,7 @@ common mistakes.
 Diagnostics come from two main sources: compilation errors and analysis findings.
 
 - **Compilation errors** are those that you would obtain from running `go
-  build`. Gopls doesn't actually run the compiler; that would be too
+build`. Gopls doesn't actually run the compiler; that would be too
   slow. Instead it runs `go list` (when needed) to compute the
   metadata of the compilation, then processes those packages in a similar
   manner to the compiler front-end: reading, scanning, and parsing the
@@ -51,7 +51,7 @@ Diagnostics come from two main sources: compilation errors and analysis findings
 
 ## Recomputation of diagnostics
 
-Diagnostics are automatically recomputed each time the source files
+By default, diagnostics are automatically recomputed each time the source files
 are edited.
 
 Compilation errors in open files are updated after a very short delay
@@ -68,9 +68,12 @@ Alternatively, diagnostics may be triggered only after an edited file
 is saved, using the
 [`diagnosticsTrigger`](../settings.md#diagnosticsTrigger) setting.
 
-Gopls does not currently support "pull-based" diagnostics, which are
-computed synchronously when requested by the client; see golang/go#53275.
-
+When initialized with `"pullDiagnostics": true`, gopls also supports
+["pull diagnostics"](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.17/specification/#textDocument_pullDiagnostics),
+an alternative mechanism for recomputing diagnostics in which the client
+requests diagnostics from gopls explicitly using the `textDocument/diagnostic`
+request. This feature is off by default until the performance of pull
+diagnostics is comparable to push diagnostics.
 
 ## Quick fixes
 
@@ -91,6 +94,7 @@ Suggested fixes that are indisputably safe are [code
 actions](transformation.md#code-actions) whose kind is
 `"source.fixAll"`.
 Many client editors have a shortcut to apply all such fixes.
+
 <!-- Note: each Code Action has exactly one kind, so a server
      must offer each "safe" action twice, once with its usual kind
      and once with kind "source.fixAll".
@@ -111,6 +115,7 @@ Settings:
   the base URI for Go package links in the Diagnostic.CodeDescription field.
 
 Client support:
+
 - **VS Code**: Each diagnostic appears as a squiggly underline.
   Hovering reveals the details, along with any suggested fixes.
 - **Emacs + eglot**: Each diagnostic appears as a squiggly underline.
@@ -118,6 +123,79 @@ Client support:
   to apply available fixes; it will prompt if there are more than one.
 - **Vim + coc.nvim**: ??
 - **CLI**: `gopls check file.go`
+
+<!-- Below we list any quick fixes (by their internal fix name)
+     that aren't analyzers. -->
+
+### `stubMissingInterfaceMethods`: Declare missing methods of I
+
+When a value of a concrete type is assigned to a variable of an
+interface type, but the concrete type does not possess all the
+necessary methods, the type checker will report a "missing method"
+error.
+
+In this situation, gopls offers a quick fix to add stub declarations
+of all the missing methods to the concrete type so that it implements
+the interface.
+
+For example, this function will not compile because the value
+`NegativeErr{}` does not implement the "error" interface:
+
+```go
+func sqrt(x float64) (float64, error) {
+	if x < 0 {
+		return 0, NegativeErr{} // error: missing method
+	}
+	...
+}
+
+type NegativeErr struct{}
+```
+
+Gopls will offer a quick fix to declare this method:
+
+```go
+
+// Error implements error.Error.
+func (NegativeErr) Error() string {
+	panic("unimplemented")
+}
+```
+
+Beware that the new declarations appear alongside the concrete type,
+which may be in a different file or even package from the cursor
+position.
+(Perhaps gopls should send a `showDocument` request to navigate the
+client there, or a progress notification indicating that something
+happened.)
+
+### `StubMissingCalledFunction`: Declare missing method T.f
+
+When you attempt to call a method on a type that does not have that method,
+the compiler will report an error such as "type X has no field or method Y".
+In this scenario, gopls now offers a quick fix to generate a stub declaration of
+the missing method, inferring its type from the call.
+
+Consider the following code where `Foo` does not have a method `bar`:
+
+```go
+type Foo struct{}
+
+func main() {
+  var s string
+  f := Foo{}
+  s = f.bar("str", 42) // error: f.bar undefined (type Foo has no field or method bar)
+}
+```
+
+Gopls will offer a quick fix, "Declare missing method Foo.bar".
+When invoked, it creates the following declaration:
+
+```go
+func (f Foo) bar(s string, i int) string {
+	panic("unimplemented")
+}
+```
 
 <!--
 

@@ -166,27 +166,32 @@ func TestImportTypeparamTests(t *testing.T) {
 	}
 
 	testenv.NeedsGoBuild(t) // to find stdlib export data in the build cache
+	testenv.NeedsGOROOTDir(t, "test")
 
 	// This package only handles gc export data.
 	if runtime.Compiler != "gc" {
 		t.Skipf("gc-built packages not available (compiler = %s)", runtime.Compiler)
 	}
 
-	testAliases(t, testImportTypeparamTests)
+	testAliases(t, func(t *testing.T) {
+		var skip map[string]string
+
+		// Add tests to skip.
+		if testenv.Go1Point() == 22 && os.Getenv("GODEBUG") == aliasesOn {
+			// The tests below can be skipped in 1.22 as gotypesalias=1 was experimental.
+			// These do not need to be addressed.
+			skip = map[string]string{
+				"struct.go":     "1.22 differences in formatting a *types.Alias",
+				"issue50259.go": "1.22 cannot compile due to an understood types.Alias bug",
+			}
+		}
+		testImportTypeparamTests(t, skip)
+	})
 }
 
-func testImportTypeparamTests(t *testing.T) {
+func testImportTypeparamTests(t *testing.T, skip map[string]string) {
 	tmpdir := mktmpdir(t)
 	defer os.RemoveAll(tmpdir)
-
-	// GoVersion -> GoDebug -> filename -> reason to skip
-	skips := map[int]map[string]map[string]string{
-		22: {aliasesOn: {
-			"issue50259.go": "internal compiler error: unexpected types2.Invalid",
-			"struct.go":     "badly formatted expectation E[int]",
-		}},
-	}
-	dbg, version := os.Getenv("GODEBUG"), testenv.Go1Point()
 
 	// Check go files in test/typeparam, except those that fail for a known
 	// reason.
@@ -203,9 +208,8 @@ func testImportTypeparamTests(t *testing.T) {
 		}
 
 		t.Run(entry.Name(), func(t *testing.T) {
-			if reason := skips[version][dbg][entry.Name()]; reason != "" {
-				t.Skipf("Skipping file %q with GODEBUG=%q due to %q at version 1.%d",
-					entry.Name(), dbg, reason, version)
+			if reason := skip[entry.Name()]; reason != "" {
+				t.Skipf("Skipping due to %s", reason)
 			}
 
 			filename := filepath.Join(rootDir, entry.Name())
@@ -1039,4 +1043,72 @@ func testAliases(t *testing.T, f func(*testing.T)) {
 			f(t)
 		})
 	}
+}
+
+type importMap map[string]*types.Package
+
+func (m importMap) Import(path string) (*types.Package, error) { return m[path], nil }
+
+func TestIssue69912(t *testing.T) {
+	fset := token.NewFileSet()
+
+	check := func(pkgname, src string, imports importMap) (*types.Package, error) {
+		f, err := goparser.ParseFile(fset, "a.go", src, 0)
+		if err != nil {
+			return nil, err
+		}
+		config := &types.Config{
+			Importer: imports,
+		}
+		return config.Check(pkgname, fset, []*ast.File{f}, nil)
+	}
+
+	const libSrc = `package lib
+
+type T int
+`
+
+	lib, err := check("lib", libSrc, nil)
+	if err != nil {
+		t.Fatalf("Checking lib: %v", err)
+	}
+
+	// Export it.
+	var out bytes.Buffer
+	if err := gcimporter.IExportData(&out, fset, lib); err != nil {
+		t.Fatalf("export: %v", err) // any failure to export is a bug
+	}
+
+	// Re-import it.
+	imports := make(map[string]*types.Package)
+	_, lib2, err := gcimporter.IImportData(fset, imports, out.Bytes(), "lib")
+	if err != nil {
+		t.Fatalf("import: %v", err) // any failure of export+import is a bug.
+	}
+
+	// Use the resulting package concurrently, via dot-imports.
+
+	const pSrc = `package p
+
+import . "lib"
+
+type S struct {
+	f T
+}
+`
+	importer := importMap{
+		"lib": lib2,
+	}
+	var wg sync.WaitGroup
+	for range 10 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := check("p", pSrc, importer)
+			if err != nil {
+				t.Errorf("check failed: %v", err)
+			}
+		}()
+	}
+	wg.Wait()
 }

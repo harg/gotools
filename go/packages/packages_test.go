@@ -23,12 +23,14 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"testing/fstest"
 	"time"
 
 	"golang.org/x/tools/go/packages"
 	"golang.org/x/tools/go/packages/packagestest"
 	"golang.org/x/tools/internal/packagesinternal"
 	"golang.org/x/tools/internal/testenv"
+	"golang.org/x/tools/internal/testfiles"
 )
 
 // testCtx is canceled when the test binary is about to time out.
@@ -2682,7 +2684,7 @@ func testIssue48226(t *testing.T, exporter packagestest.Exporter) {
 		t.Fatalf("package has errors: %v", pkg.Errors)
 	}
 
-	fname := pkg.Fset.File(pkg.Syntax[0].Pos()).Name()
+	fname := pkg.Fset.File(pkg.Syntax[0].FileStart).Name()
 	if filepath.Base(fname) != "syntax.go" {
 		t.Errorf("expected the package declaration position "+
 			"to resolve to \"syntax.go\", got %q instead", fname)
@@ -3101,5 +3103,109 @@ func TestLoadOverlayGoMod(t *testing.T) {
 	want := `[./testdata]`
 	if got != want {
 		t.Errorf("Load: got %s, want %v", got, want)
+	}
+}
+
+func overlayFS(overlay map[string][]byte) fstest.MapFS {
+	fs := make(fstest.MapFS)
+	for name, data := range overlay {
+		fs[name] = &fstest.MapFile{Data: data}
+	}
+	return fs
+}
+
+// TestIssue69606a tests when tools in $GOROOT/pkg/tool/$GOOS_$GOARCH are missing,
+// Load should return an error.
+func TestIssue69606a(t *testing.T) {
+	testenv.NeedsTool(t, "go")
+	overlay := overlayFS(map[string][]byte{
+		"io/io.go":         []byte("package io"),
+		"unsafe/unsafe.go": []byte("package unsafe"),
+	})
+	goroot := testfiles.CopyToTmp(t, overlay)
+
+	t.Logf("custom GOROOT: %s", goroot)
+
+	// load the std packages under a custom GOROOT
+	_, err := packages.Load(&packages.Config{
+		Mode: packages.NeedName |
+			packages.NeedFiles |
+			packages.NeedImports |
+			packages.NeedTypes,
+		Env: append(
+			os.Environ(),
+			"GO111MODULES=on",
+			"GOPATH=",
+			"GOWORK=off",
+			"GOPROXY=off",
+			fmt.Sprintf("GOROOT=%s", goroot)),
+	}, "std")
+
+	if err == nil {
+		t.Fatal("Expected to get an error because missing tool 'compile' but got a nil error")
+	}
+}
+
+// TestIssue69606b tests when loading std from a fake goroot without a unsafe package,
+// Load should return an error.
+func TestIssue69606b(t *testing.T) {
+	testenv.NeedsTool(t, "go")
+	overlay := overlayFS(map[string][]byte{
+		"io/io.go": []byte("package io"),
+	})
+	goroot := testfiles.CopyToTmp(t, overlay)
+
+	t.Logf("custom GOROOT: %s", goroot)
+
+	// load the std packages under a custom GOROOT
+	_, err := packages.Load(&packages.Config{
+		Mode: packages.NeedName |
+			packages.NeedFiles |
+			packages.NeedImports |
+			packages.NeedTypes,
+		Env: append(
+			os.Environ(),
+			"GO111MODULES=on",
+			"GOPATH=",
+			"GOWORK=off",
+			"GOPROXY=off",
+			fmt.Sprintf("GOROOT=%s", goroot)),
+	}, "std")
+
+	if err == nil {
+		t.Fatal("Expected to get an error because missing unsafe package but got a nil error")
+	}
+}
+
+// TestNeedTypesInfoOnly tests when NeedTypesInfo was set and NeedSyntax & NeedTypes were not,
+// Load should include the TypesInfo of packages properly
+func TestLoadTypesInfoWithoutSyntaxOrTypes(t *testing.T) {
+	testAllOrModulesParallel(t, testLoadTypesInfoWithoutSyntaxOrTypes)
+}
+
+func testLoadTypesInfoWithoutSyntaxOrTypes(t *testing.T, exporter packagestest.Exporter) {
+	exported := packagestest.Export(t, exporter, []packagestest.Module{{
+		Name: "golang.org/fake",
+		Files: map[string]interface{}{
+			"a/a.go": `package a;
+
+func foo() int {
+	i := 0
+	s := "abc"
+	return i + len(s)
+}
+`,
+		}}})
+	defer exported.Cleanup()
+	exported.Config.Mode = packages.NeedTypesInfo
+
+	pkgs, err := packages.Load(exported.Config, "golang.org/fake/a")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// check if types info is present
+	if pkgs[0].TypesInfo == nil {
+		t.Errorf("expected types info to be present but got nil")
 	}
 }

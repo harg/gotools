@@ -17,8 +17,10 @@ import (
 	"golang.org/x/tools/gopls/internal/golang/completion/snippet"
 	"golang.org/x/tools/gopls/internal/protocol"
 	"golang.org/x/tools/gopls/internal/util/safetoken"
+	"golang.org/x/tools/gopls/internal/util/typesutil"
 	"golang.org/x/tools/internal/event"
 	"golang.org/x/tools/internal/imports"
+	"golang.org/x/tools/internal/typesinternal"
 )
 
 var (
@@ -59,12 +61,10 @@ func (c *completer) item(ctx context.Context, cand candidate) (CompletionItem, e
 		detail = ""
 	}
 	if isTypeName(obj) && c.wantTypeParams() {
-		x := cand.obj.(*types.TypeName)
-		if named, ok := types.Unalias(x.Type()).(*types.Named); ok {
-			tp := named.TypeParams()
-			label += golang.FormatTypeParams(tp)
-			insert = label // maintain invariant above (label == insert)
-		}
+		// obj is a *types.TypeName, so its type must be Alias|Named.
+		tparams := typesinternal.TypeParams(obj.Type().(typesinternal.NamedOrAlias))
+		label += typesutil.FormatTypeParams(tparams)
+		insert = label // maintain invariant above (label == insert)
 	}
 
 	snip.WriteText(insert)

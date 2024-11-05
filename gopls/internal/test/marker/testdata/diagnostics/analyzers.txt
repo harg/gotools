@@ -1,12 +1,16 @@
 Test of warning diagnostics from various analyzers:
 copylocks, printf, slog, tests, timeformat, nilness, and cgocall.
 
+-- settings.json --
+{
+	"pullDiagnostics": true
+}
+
 -- go.mod --
 module example.com
 go 1.12
 
 -- flags --
--min_go=go1.21
 -cgo
 
 -- bad_test.go --
@@ -14,6 +18,7 @@ package analyzer
 
 import (
 	"fmt"
+	"log/slog"
 	"sync"
 	"testing"
 	"time"
@@ -56,9 +61,16 @@ func _(s struct{x int}) {
 	s.x = 1  //@diag("x", re"unused write to field x")
 }
 
--- cgocall.go --
-package analyzer
+// slog
+func _() {
+	slog.Info("msg", 1) //@diag("1", re`slog.Info arg "1" should be a string or a slog.Attr`)
+}
 
+-- cgocall/cgocall.go --
+package cgocall
+
+// Note: this test must be in a separate package, as the unsafe import
+// silences the unusedwrite analyzer.
 import "unsafe"
 
 // void f(void *ptr) {}
@@ -67,16 +79,4 @@ import "C"
 // cgocall
 func _(c chan bool) {
 	C.f(unsafe.Pointer(&c)) //@ diag("unsafe", re"passing Go type with embedded pointer to C")
-}
-
--- bad_test_go121.go --
-//go:build go1.21
-
-package analyzer
-
-import "log/slog"
-
-// slog
-func _() {
-	slog.Info("msg", 1) //@diag("1", re`slog.Info arg "1" should be a string or a slog.Attr`)
 }

@@ -27,7 +27,6 @@ import (
 	"sort"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
@@ -56,6 +55,7 @@ func TestMain(m *testing.M) {
 	testenv.ExitIfSmallMachine()
 	// Disable GOPACKAGESDRIVER, as it can cause spurious test failures.
 	os.Setenv("GOPACKAGESDRIVER", "off")
+	integration.FilterToolchainPathAndGOROOT()
 	os.Exit(m.Run())
 }
 
@@ -108,10 +108,6 @@ func Test(t *testing.T) {
 	// Opt: use a shared cache.
 	cache := cache.New(nil)
 
-	// Opt: seed the cache and file cache by type-checking and analyzing common
-	// standard library packages.
-	seedCache(t, cache)
-
 	for _, test := range tests {
 		test := test
 		t.Run(test.name, func(t *testing.T) {
@@ -135,12 +131,19 @@ func Test(t *testing.T) {
 				}
 				testenv.NeedsGo1Point(t, go1point)
 			}
-			if test.maxGoVersion != "" {
+			if test.minGoCommandVersion != "" {
 				var go1point int
-				if _, err := fmt.Sscanf(test.maxGoVersion, "go1.%d", &go1point); err != nil {
-					t.Fatalf("parsing -max_go version: %v", err)
+				if _, err := fmt.Sscanf(test.minGoCommandVersion, "go1.%d", &go1point); err != nil {
+					t.Fatalf("parsing -min_go_command version: %v", err)
 				}
-				testenv.SkipAfterGo1Point(t, go1point)
+				testenv.NeedsGoCommand1Point(t, go1point)
+			}
+			if test.maxGoCommandVersion != "" {
+				var go1point int
+				if _, err := fmt.Sscanf(test.maxGoCommandVersion, "go1.%d", &go1point); err != nil {
+					t.Fatalf("parsing -max_go_command version: %v", err)
+				}
+				testenv.SkipAfterGoCommand1Point(t, go1point)
 			}
 			if test.cgo {
 				testenv.NeedsTool(t, "cgo")
@@ -150,12 +153,14 @@ func Test(t *testing.T) {
 				CapabilitiesJSON: test.capabilities,
 				Env:              test.env,
 			}
+
 			if _, ok := config.Settings["diagnosticsDelay"]; !ok {
 				if config.Settings == nil {
 					config.Settings = make(map[string]any)
 				}
 				config.Settings["diagnosticsDelay"] = "10ms"
 			}
+
 			// inv: config.Settings != nil
 
 			run := &markerTestRun{
@@ -179,13 +184,32 @@ func Test(t *testing.T) {
 				run.env.OpenFile(file)
 			}
 
+			allDiags := make(map[string][]protocol.Diagnostic)
+			if run.env.Editor.ServerCapabilities().DiagnosticProvider != nil {
+				for name := range test.files {
+					// golang/go#53275: support pull diagnostics for go.mod and go.work
+					// files.
+					if strings.HasSuffix(name, ".go") {
+						allDiags[name] = run.env.Diagnostics(name)
+					}
+				}
+			} else {
+				// Wait for the didOpen notifications to be processed, then collect
+				// diagnostics.
+
+				run.env.AfterChange()
+				var diags map[string]*protocol.PublishDiagnosticsParams
+				run.env.AfterChange(integration.ReadAllDiagnostics(&diags))
+				for path, params := range diags {
+					allDiags[path] = params.Diagnostics
+				}
+			}
+
 			// Wait for the didOpen notifications to be processed, then collect
 			// diagnostics.
-			var diags map[string]*protocol.PublishDiagnosticsParams
-			run.env.AfterChange(integration.ReadAllDiagnostics(&diags))
-			for path, params := range diags {
+			for path, diags := range allDiags {
 				uri := run.env.Sandbox.Workdir.URI(path)
-				for _, diag := range params.Diagnostics {
+				for _, diag := range diags {
 					loc := protocol.Location{
 						URI: uri,
 						Range: protocol.Range{
@@ -267,58 +291,6 @@ func Test(t *testing.T) {
 	if abs, err := filepath.Abs(dir); err == nil && t.Failed() {
 		t.Logf("(Filenames are relative to %s.)", abs)
 	}
-}
-
-// seedCache populates the file cache by type checking and analyzing standard
-// library packages that are reachable from tests.
-//
-// Most tests are themselves small codebases, and yet may reference large
-// amounts of standard library code. Since tests are heavily parallelized, they
-// naively end up type checking and analyzing many of the same standard library
-// packages. By seeding the cache, we ensure cache hits for these standard
-// library packages, significantly reducing the amount of work done by each
-// test.
-//
-// The following command was used to determine the set of packages to import
-// below:
-//
-//	rm -rf ~/.cache/gopls && \
-//	 go test -count=1 ./internal/test/marker -cpuprofile=prof -v
-//
-// Look through the individual test timings to see which tests are slow, then
-// look through the imports of slow tests to see which standard library
-// packages are imported. Choose high level packages such as go/types that
-// import others such as fmt or go/ast. After doing so, re-run the command and
-// verify that the total samples in the collected profile decreased.
-func seedCache(t *testing.T, cache *cache.Cache) {
-	start := time.Now()
-
-	// The the doc string for details on how this seed was produced.
-	seed := `package p
-import (
-	_ "net/http"
-	_ "sort"
-	_ "go/types"
-	_ "testing"
-)
-`
-
-	// Create a test environment for the seed file.
-	env := newEnv(t, cache, map[string][]byte{"p.go": []byte(seed)}, nil, nil, fake.EditorConfig{})
-	// See other TODO: this cleanup logic is too messy.
-	defer env.Editor.Shutdown(context.Background()) // ignore error
-	defer env.Sandbox.Close()                       // ignore error
-	env.Awaiter.Await(context.Background(), integration.InitialWorkspaceLoad)
-
-	// Opening the file is necessary to trigger analysis.
-	env.OpenFile("p.go")
-
-	// As a checksum, verify that the file has no errors after analysis.
-	// This isn't strictly necessary, but helps avoid incorrect seeding due to
-	// typos.
-	env.AfterChange(integration.NoDiagnostics())
-
-	t.Logf("warming the cache took %s", time.Since(start))
 }
 
 // A marker holds state for the execution of a single @marker
@@ -540,8 +512,8 @@ var actionMarkerFuncs = map[string]func(marker){
 	"selectionrange":   actionMarkerFunc(selectionRangeMarker),
 	"signature":        actionMarkerFunc(signatureMarker),
 	"snippet":          actionMarkerFunc(snippetMarker),
-	"suggestedfix":     actionMarkerFunc(suggestedfixMarker),
-	"suggestedfixerr":  actionMarkerFunc(suggestedfixErrMarker),
+	"quickfix":         actionMarkerFunc(quickfixMarker),
+	"quickfixerr":      actionMarkerFunc(quickfixErrMarker),
 	"symbol":           actionMarkerFunc(symbolMarker),
 	"token":            actionMarkerFunc(tokenMarker),
 	"typedef":          actionMarkerFunc(typedefMarker),
@@ -569,16 +541,17 @@ type markerTest struct {
 	flags      []string // flags extracted from the special "flags" archive file.
 
 	// Parsed flags values. See the flag definitions below for documentation.
-	minGoVersion     string
-	maxGoVersion     string
-	cgo              bool
-	writeGoSum       []string
-	skipGOOS         []string
-	skipGOARCH       []string
-	ignoreExtraDiags bool
-	filterBuiltins   bool
-	filterKeywords   bool
-	errorsOK         bool
+	minGoVersion        string // minimum Go runtime version; max should never be needed
+	minGoCommandVersion string
+	maxGoCommandVersion string
+	cgo                 bool
+	writeGoSum          []string
+	skipGOOS            []string
+	skipGOARCH          []string
+	ignoreExtraDiags    bool
+	filterBuiltins      bool
+	filterKeywords      bool
+	errorsOK            bool
 }
 
 // flagSet returns the flagset used for parsing the special "flags" file in the
@@ -586,7 +559,8 @@ type markerTest struct {
 func (t *markerTest) flagSet() *flag.FlagSet {
 	flags := flag.NewFlagSet(t.name, flag.ContinueOnError)
 	flags.StringVar(&t.minGoVersion, "min_go", "", "if set, the minimum go1.X version required for this test")
-	flags.StringVar(&t.maxGoVersion, "max_go", "", "if set, the maximum go1.X version required for this test")
+	flags.StringVar(&t.minGoCommandVersion, "min_go_command", "", "if set, the minimum go1.X go command version required for this test")
+	flags.StringVar(&t.maxGoCommandVersion, "max_go_command", "", "if set, the maximum go1.X go command version required for this test")
 	flags.BoolVar(&t.cgo, "cgo", false, "if set, requires cgo (both the cgo tool and CGO_ENABLED=1)")
 	flags.Var((*stringListValue)(&t.writeGoSum), "write_sumfile", "if set, write the sumfile for these directories")
 	flags.Var((*stringListValue)(&t.skipGOOS), "skip_goos", "if set, skip this test on these GOOS values")
@@ -873,7 +847,7 @@ func newEnv(t *testing.T, cache *cache.Cache, files, proxyFiles map[string][]byt
 	}
 
 	for _, dir := range writeGoSum {
-		if err := sandbox.RunGoCommand(context.Background(), dir, "list", []string{"-mod=mod", "..."}, []string{"GOWORK=off"}, true); err != nil {
+		if _, err := sandbox.RunGoCommand(context.Background(), dir, "list", []string{"-mod=mod", "..."}, []string{"GOWORK=off"}, true); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -911,7 +885,7 @@ type markerTestRun struct {
 	settings map[string]any
 
 	// Collected information.
-	// Each @diag/@suggestedfix marker eliminates an entry from diags.
+	// Each @diag/@quickfix marker eliminates an entry from diags.
 	values map[expect.Identifier]any
 	diags  map[protocol.Location][]protocol.Diagnostic // diagnostics by position; location end == start
 
@@ -1933,7 +1907,7 @@ func codeActionMarker(mark marker, start, end protocol.Location, actionKind stri
 	loc.Range.End = end.Range.End
 
 	// Apply the fix it suggests.
-	changed, err := codeAction(mark.run.env, loc.URI, loc.Range, actionKind, nil)
+	changed, err := codeAction(mark.run.env, loc.URI, loc.Range, protocol.CodeActionKind(actionKind), nil)
 	if err != nil {
 		mark.errorf("codeAction failed: %v", err)
 		return
@@ -1944,7 +1918,7 @@ func codeActionMarker(mark marker, start, end protocol.Location, actionKind stri
 }
 
 func codeActionEditMarker(mark marker, loc protocol.Location, actionKind string, g *Golden) {
-	changed, err := codeAction(mark.run.env, loc.URI, loc.Range, actionKind, nil)
+	changed, err := codeAction(mark.run.env, loc.URI, loc.Range, protocol.CodeActionKind(actionKind), nil)
 	if err != nil {
 		mark.errorf("codeAction failed: %v", err)
 		return
@@ -1956,7 +1930,7 @@ func codeActionEditMarker(mark marker, loc protocol.Location, actionKind string,
 func codeActionErrMarker(mark marker, start, end protocol.Location, actionKind string, wantErr stringMatcher) {
 	loc := start
 	loc.Range.End = end.Range.End
-	_, err := codeAction(mark.run.env, loc.URI, loc.Range, actionKind, nil)
+	_, err := codeAction(mark.run.env, loc.URI, loc.Range, protocol.CodeActionKind(actionKind), nil)
 	wantErr.checkErr(mark, err)
 }
 
@@ -2026,11 +2000,11 @@ func (mark marker) consumeExtraNotes(name string, f func(marker)) {
 	}
 }
 
-// suggestedfixMarker implements the @suggestedfix(location, regexp,
+// quickfixMarker implements the @quickfix(location, regexp,
 // kind, golden) marker. It acts like @diag(location, regexp), to set
-// the expectation of a diagnostic, but then it applies the first code
-// action of the specified kind suggested by the matched diagnostic.
-func suggestedfixMarker(mark marker, loc protocol.Location, re *regexp.Regexp, golden *Golden) {
+// the expectation of a diagnostic, but then it applies the "quickfix"
+// code action (which must be unique) suggested by the matched diagnostic.
+func quickfixMarker(mark marker, loc protocol.Location, re *regexp.Regexp, golden *Golden) {
 	loc.Range.End = loc.Range.Start // diagnostics ignore end position.
 	// Find and remove the matching diagnostic.
 	diag, ok := removeDiagnostic(mark, loc, re)
@@ -2042,7 +2016,7 @@ func suggestedfixMarker(mark marker, loc protocol.Location, re *regexp.Regexp, g
 	// Apply the fix it suggests.
 	changed, err := codeAction(mark.run.env, loc.URI, diag.Range, "quickfix", &diag)
 	if err != nil {
-		mark.errorf("suggestedfix failed: %v. (Use @suggestedfixerr for expected errors.)", err)
+		mark.errorf("quickfix failed: %v. (Use @quickfixerr for expected errors.)", err)
 		return
 	}
 
@@ -2050,7 +2024,7 @@ func suggestedfixMarker(mark marker, loc protocol.Location, re *regexp.Regexp, g
 	checkDiffs(mark, changed, golden)
 }
 
-func suggestedfixErrMarker(mark marker, loc protocol.Location, re *regexp.Regexp, wantErr stringMatcher) {
+func quickfixErrMarker(mark marker, loc protocol.Location, re *regexp.Regexp, wantErr stringMatcher) {
 	loc.Range.End = loc.Range.Start // diagnostics ignore end position.
 	// Find and remove the matching diagnostic.
 	diag, ok := removeDiagnostic(mark, loc, re)
@@ -2071,8 +2045,8 @@ func suggestedfixErrMarker(mark marker, loc protocol.Location, re *regexp.Regexp
 // The resulting map contains resulting file contents after the code action is
 // applied. Currently, this function does not support code actions that return
 // edits directly; it only supports code action commands.
-func codeAction(env *integration.Env, uri protocol.DocumentURI, rng protocol.Range, actionKind string, diag *protocol.Diagnostic) (map[string][]byte, error) {
-	changes, err := codeActionChanges(env, uri, rng, actionKind, diag)
+func codeAction(env *integration.Env, uri protocol.DocumentURI, rng protocol.Range, kind protocol.CodeActionKind, diag *protocol.Diagnostic) (map[string][]byte, error) {
+	changes, err := codeActionChanges(env, uri, rng, kind, diag)
 	if err != nil {
 		return nil, err
 	}
@@ -2082,15 +2056,15 @@ func codeAction(env *integration.Env, uri protocol.DocumentURI, rng protocol.Ran
 // codeActionChanges executes a textDocument/codeAction request for the
 // specified location and kind, and captures the resulting document changes.
 // If diag is non-nil, it is used as the code action context.
-func codeActionChanges(env *integration.Env, uri protocol.DocumentURI, rng protocol.Range, actionKind string, diag *protocol.Diagnostic) ([]protocol.DocumentChange, error) {
+func codeActionChanges(env *integration.Env, uri protocol.DocumentURI, rng protocol.Range, kind protocol.CodeActionKind, diag *protocol.Diagnostic) ([]protocol.DocumentChange, error) {
 	// Request all code actions that apply to the diagnostic.
-	// (The protocol supports filtering using Context.Only={actionKind}
-	// but we can give a better error if we don't filter.)
+	// A production client would set Only=[kind],
+	// but we can give a better error if we don't filter.
 	params := &protocol.CodeActionParams{
 		TextDocument: protocol.TextDocumentIdentifier{URI: uri},
 		Range:        rng,
 		Context: protocol.CodeActionContext{
-			Only: nil, // => all kinds
+			Only: []protocol.CodeActionKind{protocol.Empty}, // => all
 		},
 	}
 	if diag != nil {
@@ -2106,7 +2080,7 @@ func codeActionChanges(env *integration.Env, uri protocol.DocumentURI, rng proto
 	// (e.g. refactor.inline.call).
 	var candidates []protocol.CodeAction
 	for _, act := range actions {
-		if act.Kind == protocol.CodeActionKind(actionKind) {
+		if act.Kind == kind {
 			candidates = append(candidates, act)
 		}
 	}
@@ -2114,7 +2088,7 @@ func codeActionChanges(env *integration.Env, uri protocol.DocumentURI, rng proto
 		for _, act := range actions {
 			env.T.Logf("found CodeAction Kind=%s Title=%q", act.Kind, act.Title)
 		}
-		return nil, fmt.Errorf("found %d CodeActions of kind %s for this diagnostic, want 1", len(candidates), actionKind)
+		return nil, fmt.Errorf("found %d CodeActions of kind %s for this diagnostic, want 1", len(candidates), kind)
 	}
 	action := candidates[0]
 
@@ -2165,7 +2139,7 @@ func codeActionChanges(env *integration.Env, uri protocol.DocumentURI, rng proto
 		//
 		// The client makes an ExecuteCommand RPC to the server,
 		// which dispatches it to the ApplyFix handler.
-		// ApplyFix dispatches to the "stub_methods" suggestedfix hook (the meat).
+		// ApplyFix dispatches to the "stub_methods" fixer (the meat).
 		// The server then makes an ApplyEdit RPC to the client,
 		// whose WorkspaceEditFunc hook temporarily gathers the edits
 		// instead of applying them.

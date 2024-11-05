@@ -9,6 +9,7 @@ import (
 	"go/parser"
 	"go/scanner"
 	"go/token"
+	"sync"
 
 	"golang.org/x/tools/gopls/internal/protocol"
 	"golang.org/x/tools/gopls/internal/util/safetoken"
@@ -18,6 +19,12 @@ import (
 type File struct {
 	URI  protocol.DocumentURI
 	Mode parser.Mode
+
+	// File is the file resulting from parsing. It is always non-nil.
+	//
+	// Clients must not access the AST's legacy ast.Object-related
+	// fields without first ensuring that [File.Resolve] was
+	// already called.
 	File *ast.File
 	Tok  *token.File
 	// Source code used to build the AST. It may be different from the
@@ -39,13 +46,16 @@ type File struct {
 	fixedAST bool
 	Mapper   *protocol.Mapper // may map fixed Src, not file content
 	ParseErr scanner.ErrorList
+
+	// resolveOnce guards the lazy ast.Object resolution. See [File.Resolve].
+	resolveOnce sync.Once
 }
 
-func (pgf File) String() string { return string(pgf.URI) }
+func (pgf *File) String() string { return string(pgf.URI) }
 
 // Fixed reports whether p was "Fixed", meaning that its source or positions
 // may not correlate with the original file.
-func (pgf File) Fixed() bool {
+func (pgf *File) Fixed() bool {
 	return pgf.fixedSrc || pgf.fixedAST
 }
 
@@ -81,6 +91,11 @@ func (pgf *File) NodeRange(node ast.Node) (protocol.Range, error) {
 	return pgf.Mapper.NodeRange(pgf.Tok, node)
 }
 
+// NodeOffsets returns offsets for the ast.Node.
+func (pgf *File) NodeOffsets(node ast.Node) (start int, end int, _ error) {
+	return safetoken.Offsets(pgf.Tok, node.Pos(), node.End())
+}
+
 // NodeMappedRange returns a MappedRange for the ast.Node interval in this file.
 // A MappedRange can be converted to any other form.
 func (pgf *File) NodeMappedRange(node ast.Node) (protocol.MappedRange, error) {
@@ -99,4 +114,29 @@ func (pgf *File) RangePos(r protocol.Range) (token.Pos, token.Pos, error) {
 		return token.NoPos, token.NoPos, err
 	}
 	return pgf.Tok.Pos(start), pgf.Tok.Pos(end), nil
+}
+
+// Resolve lazily resolves ast.Ident.Objects in the enclosed syntax tree.
+//
+// Resolve must be called before accessing any of:
+//   - pgf.File.Scope
+//   - pgf.File.Unresolved
+//   - Ident.Obj, for any Ident in pgf.File
+func (pgf *File) Resolve() {
+	pgf.resolveOnce.Do(func() {
+		if pgf.File.Scope != nil {
+			return // already resolved by parsing without SkipObjectResolution.
+		}
+		defer func() {
+			// (panic handler duplicated from go/parser)
+			if e := recover(); e != nil {
+				// A bailout indicates the resolution stack has exceeded max depth.
+				if _, ok := e.(bailout); !ok {
+					panic(e)
+				}
+			}
+		}()
+		declErr := func(token.Pos, string) {}
+		resolveFile(pgf.File, pgf.Tok, declErr)
+	})
 }

@@ -145,7 +145,7 @@ func readIndexFrom(cd Abspath, bx io.Reader) (*Index, error) {
 	}
 	// TODO(pjw): need to check that this is the expected cachedir
 	// so the tag should be passed in to this function
-	ans.Changed, err = time.Parse(time.DateTime, b.Text())
+	ans.Changed, err = time.ParseInLocation(time.DateTime, b.Text(), time.Local)
 	if err != nil {
 		return nil, err
 	}
@@ -207,11 +207,13 @@ func writeIndex(cachedir Abspath, ix *Index) error {
 }
 
 func writeIndexToFile(x *Index, fd *os.File) error {
+	cnt := 0
 	w := bufio.NewWriter(fd)
 	fmt.Fprintf(w, "%d\n", x.Version)
 	fmt.Fprintf(w, "%s\n", x.Cachedir)
-	// TODO(pjw): round the time down
-	fmt.Fprintf(w, "%s\n", x.Changed.Format(time.DateTime))
+	// round the time down
+	tm := x.Changed.Add(-time.Second / 2)
+	fmt.Fprintf(w, "%s\n", tm.Format(time.DateTime))
 	for _, e := range x.Entries {
 		if e.ImportPath == "" {
 			continue // shouldn't happen
@@ -227,11 +229,13 @@ func writeIndexToFile(x *Index, fd *os.File) error {
 		}
 		for _, x := range e.Names {
 			fmt.Fprintf(w, "%s\n", x)
+			cnt++
 		}
 	}
 	if err := w.Flush(); err != nil {
 		return err
 	}
+	log.Printf("%d Entries %d names", len(x.Entries), cnt)
 	return nil
 }
 

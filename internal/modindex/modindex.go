@@ -13,7 +13,6 @@
 package modindex
 
 import (
-	"log"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -22,36 +21,51 @@ import (
 	"golang.org/x/mod/semver"
 )
 
-// Modindex writes an index current as of when it is called.
+// Create always creates a new index for the go module cache that is in cachedir.
+func Create(cachedir string) error {
+	_, err := indexModCache(cachedir, true)
+	return err
+}
+
+// Update the index for the go module cache that is in cachedir,
+// If there is no existing index it will build one.
+// If there are changed directories since the last index, it will
+// write a new one and return true. Otherwise it returns false.
+func Update(cachedir string) (bool, error) {
+	return indexModCache(cachedir, false)
+}
+
+// indexModCache writes an index current as of when it is called.
 // If clear is true the index is constructed from all of GOMODCACHE
 // otherwise the index is constructed from the last previous index
-// and the updates to the cache.
-func IndexModCache(cachedir string, clear bool) error {
+// and the updates to the cache. It returns true if it wrote an index,
+// false otherwise.
+func indexModCache(cachedir string, clear bool) (bool, error) {
 	cachedir, err := filepath.Abs(cachedir)
 	if err != nil {
-		return err
+		return false, err
 	}
 	cd := Abspath(cachedir)
 	future := time.Now().Add(24 * time.Hour) // safely in the future
-	err = modindexTimed(future, cd, clear)
+	ok, err := modindexTimed(future, cd, clear)
 	if err != nil {
-		return err
+		return false, err
 	}
-	return nil
+	return ok, nil
 }
 
 // modindexTimed writes an index current as of onlyBefore.
 // If clear is true the index is constructed from all of GOMODCACHE
 // otherwise the index is constructed from the last previous index
 // and all the updates to the cache before onlyBefore.
-// (this is useful for testing; perhaps it should not be exported)
-func modindexTimed(onlyBefore time.Time, cachedir Abspath, clear bool) error {
+// It returns true if it wrote a new index, false if it wrote nothing.
+func modindexTimed(onlyBefore time.Time, cachedir Abspath, clear bool) (bool, error) {
 	var curIndex *Index
 	if !clear {
 		var err error
 		curIndex, err = ReadIndex(string(cachedir))
 		if clear && err != nil {
-			return err
+			return false, err
 		}
 		// TODO(pjw): check that most of those directorie still exist
 	}
@@ -64,12 +78,16 @@ func modindexTimed(onlyBefore time.Time, cachedir Abspath, clear bool) error {
 		cfg.onlyAfter = curIndex.Changed
 	}
 	if err := cfg.buildIndex(); err != nil {
-		return err
+		return false, err
+	}
+	if len(cfg.newIndex.Entries) == 0 {
+		// no changes, don't write a new index
+		return false, nil
 	}
 	if err := cfg.writeIndex(); err != nil {
-		return err
+		return false, err
 	}
-	return nil
+	return true, nil
 }
 
 type work struct {
@@ -87,52 +105,50 @@ func (w *work) buildIndex() error {
 	// so set it now.
 	w.newIndex = &Index{Changed: time.Now(), Cachedir: w.cacheDir}
 	dirs := findDirs(string(w.cacheDir), w.onlyAfter, w.onlyBefore)
+	if len(dirs) == 0 {
+		return nil
+	}
 	newdirs, err := byImportPath(dirs)
 	if err != nil {
 		return err
 	}
-	log.Printf("%d dirs, %d ips", len(dirs), len(newdirs))
 	// for each import path it might occur only in newdirs,
 	// only in w.oldIndex, or in both.
 	// If it occurs in both, use the semantically later one
 	if w.oldIndex != nil {
-		killed := 0
 		for _, e := range w.oldIndex.Entries {
 			found, ok := newdirs[e.ImportPath]
 			if !ok {
-				continue
+				w.newIndex.Entries = append(w.newIndex.Entries, e)
+				continue // use this one, there is no new one
 			}
 			if semver.Compare(found[0].version, e.Version) > 0 {
-				// the new one is better, disable the old one
-				e.ImportPath = ""
-				killed++
+				// use the new one
 			} else {
 				// use the old one, forget the new one
+				w.newIndex.Entries = append(w.newIndex.Entries, e)
 				delete(newdirs, e.ImportPath)
 			}
 		}
-		log.Printf("%d killed, %d ips", killed, len(newdirs))
 	}
-	// Build the skeleton of the new index using newdirs,
-	// and include the surviving parts of the old index
-	if w.oldIndex != nil {
-		for _, e := range w.oldIndex.Entries {
-			if e.ImportPath != "" {
-				w.newIndex.Entries = append(w.newIndex.Entries, e)
-			}
-		}
-	}
+	// get symbol information for all the new diredtories
+	getSymbols(w.cacheDir, newdirs)
+	// assemble the new index entries
 	for k, v := range newdirs {
 		d := v[0]
+		pkg, names := processSyms(d.syms)
+		if pkg == "" {
+			continue // PJW: does this ever happen?
+		}
 		entry := Entry{
+			PkgName:    pkg,
 			Dir:        d.path,
 			ImportPath: k,
 			Version:    d.version,
+			Names:      names,
 		}
 		w.newIndex.Entries = append(w.newIndex.Entries, entry)
 	}
-	// find symbols for the incomplete entries
-	log.Print("not finding any symbols yet")
 	// sort the entries in the new index
 	slices.SortFunc(w.newIndex.Entries, func(l, r Entry) int {
 		if n := strings.Compare(l.PkgName, r.PkgName); n != 0 {

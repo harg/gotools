@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"golang.org/x/tools/gopls/internal/cache/metadata"
+	"golang.org/x/tools/gopls/internal/cache/typerefs"
 	"golang.org/x/tools/gopls/internal/file"
 	"golang.org/x/tools/gopls/internal/protocol"
 	"golang.org/x/tools/gopls/internal/settings"
@@ -68,6 +69,7 @@ type GoEnv struct {
 	GOFLAGS     string
 	GO111MODULE string
 	GOTOOLCHAIN string
+	GOROOT      string
 
 	// Go version output.
 	GoVersion       int    // The X in Go 1.X
@@ -105,6 +107,9 @@ type View struct {
 	baseCtx context.Context
 
 	importsState *importsState
+
+	// pkgIndex is an index of package IDs, for efficient storage of typerefs.
+	pkgIndex *typerefs.PackageIndex
 
 	// parseCache holds an LRU cache of recently parsed files.
 	parseCache *parseCache
@@ -994,6 +999,7 @@ func FetchGoEnv(ctx context.Context, folder protocol.DocumentURI, opts *settings
 		"GOFLAGS":     &env.GOFLAGS,
 		"GO111MODULE": &env.GO111MODULE,
 		"GOTOOLCHAIN": &env.GOTOOLCHAIN,
+		"GOROOT":      &env.GOROOT,
 	}
 	if err := loadGoEnv(ctx, dir, opts.EnvSlice(), runner, envvars); err != nil {
 		return nil, err

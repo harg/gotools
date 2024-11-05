@@ -31,7 +31,6 @@ import (
 	"golang.org/x/tools/internal/gocommand"
 	"golang.org/x/tools/internal/packagesinternal"
 	"golang.org/x/tools/internal/typesinternal"
-	"golang.org/x/tools/internal/versions"
 )
 
 // A LoadMode controls the amount of detail to return when loading.
@@ -765,7 +764,7 @@ func newLoader(cfg *Config) *loader {
 	ld.requestedMode = ld.Mode
 	ld.Mode = impliedLoadMode(ld.Mode)
 
-	if ld.Mode&NeedTypes != 0 || ld.Mode&NeedSyntax != 0 {
+	if ld.Mode&(NeedTypes|NeedSyntax|NeedTypesInfo) != 0 {
 		if ld.Fset == nil {
 			ld.Fset = token.NewFileSet()
 		}
@@ -921,7 +920,7 @@ func (ld *loader) refine(response *DriverResponse) ([]*Package, error) {
 
 	// Load type data and syntax if needed, starting at
 	// the initial packages (roots of the import DAG).
-	if ld.Mode&NeedTypes != 0 || ld.Mode&NeedSyntax != 0 {
+	if ld.Mode&(NeedTypes|NeedSyntax|NeedTypesInfo) != 0 {
 		var wg sync.WaitGroup
 		for _, lpkg := range initial {
 			wg.Add(1)
@@ -1159,7 +1158,7 @@ func (ld *loader) loadPackage(lpkg *loaderPackage) {
 	}
 
 	lpkg.Syntax = files
-	if ld.Config.Mode&NeedTypes == 0 {
+	if ld.Config.Mode&(NeedTypes|NeedTypesInfo) == 0 {
 		return
 	}
 
@@ -1171,15 +1170,15 @@ func (ld *loader) loadPackage(lpkg *loaderPackage) {
 	}
 
 	lpkg.TypesInfo = &types.Info{
-		Types:      make(map[ast.Expr]types.TypeAndValue),
-		Defs:       make(map[*ast.Ident]types.Object),
-		Uses:       make(map[*ast.Ident]types.Object),
-		Implicits:  make(map[ast.Node]types.Object),
-		Instances:  make(map[*ast.Ident]types.Instance),
-		Scopes:     make(map[ast.Node]*types.Scope),
-		Selections: make(map[*ast.SelectorExpr]*types.Selection),
+		Types:        make(map[ast.Expr]types.TypeAndValue),
+		Defs:         make(map[*ast.Ident]types.Object),
+		Uses:         make(map[*ast.Ident]types.Object),
+		Implicits:    make(map[ast.Node]types.Object),
+		Instances:    make(map[*ast.Ident]types.Instance),
+		Scopes:       make(map[ast.Node]*types.Scope),
+		Selections:   make(map[*ast.SelectorExpr]*types.Selection),
+		FileVersions: make(map[*ast.File]string),
 	}
-	versions.InitFileVersions(lpkg.TypesInfo)
 	lpkg.TypesSizes = ld.sizes
 
 	importer := importerFunc(func(path string) (*types.Package, error) {
@@ -1314,15 +1313,20 @@ func (ld *loader) parseFile(filename string) (*ast.File, error) {
 
 		var src []byte
 		for f, contents := range ld.Config.Overlay {
+			// TODO(adonovan): Inefficient for large overlays.
+			// Do an exact name-based map lookup
+			// (for nonexistent files) followed by a
+			// FileID-based map lookup (for existing ones).
 			if sameFile(f, filename) {
 				src = contents
+				break
 			}
 		}
 		var err error
 		if src == nil {
-			ioLimit <- true // wait
+			ioLimit <- true // acquire a token
 			src, err = os.ReadFile(filename)
-			<-ioLimit // signal
+			<-ioLimit // release a token
 		}
 		if err != nil {
 			v.err = err
@@ -1342,18 +1346,21 @@ func (ld *loader) parseFile(filename string) (*ast.File, error) {
 // Because files are scanned in parallel, the token.Pos
 // positions of the resulting ast.Files are not ordered.
 func (ld *loader) parseFiles(filenames []string) ([]*ast.File, []error) {
-	var wg sync.WaitGroup
-	n := len(filenames)
-	parsed := make([]*ast.File, n)
-	errors := make([]error, n)
-	for i, file := range filenames {
-		wg.Add(1)
-		go func(i int, filename string) {
+	var (
+		n      = len(filenames)
+		parsed = make([]*ast.File, n)
+		errors = make([]error, n)
+	)
+	var g errgroup.Group
+	for i, filename := range filenames {
+		// This creates goroutines unnecessarily in the
+		// cache-hit case, but that case is uncommon.
+		g.Go(func() error {
 			parsed[i], errors[i] = ld.parseFile(filename)
-			wg.Done()
-		}(i, file)
+			return nil
+		})
 	}
-	wg.Wait()
+	g.Wait()
 
 	// Eliminate nils, preserving order.
 	var o int

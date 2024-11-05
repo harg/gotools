@@ -14,7 +14,6 @@ import (
 	"golang.org/x/tools/go/analysis"
 	"golang.org/x/tools/gopls/internal/analysis/embeddirective"
 	"golang.org/x/tools/gopls/internal/analysis/fillstruct"
-	"golang.org/x/tools/gopls/internal/analysis/stubmethods"
 	"golang.org/x/tools/gopls/internal/analysis/undeclaredname"
 	"golang.org/x/tools/gopls/internal/analysis/unusedparams"
 	"golang.org/x/tools/gopls/internal/cache"
@@ -59,13 +58,15 @@ func singleFile(fixer1 singleFileFixer) fixer {
 
 // Names of ApplyFix.Fix created directly by the CodeAction handler.
 const (
-	fixExtractVariable   = "extract_variable"
-	fixExtractFunction   = "extract_function"
-	fixExtractMethod     = "extract_method"
-	fixInlineCall        = "inline_call"
-	fixInvertIfCondition = "invert_if_condition"
-	fixSplitLines        = "split_lines"
-	fixJoinLines         = "join_lines"
+	fixExtractVariable         = "extract_variable"
+	fixExtractFunction         = "extract_function"
+	fixExtractMethod           = "extract_method"
+	fixInlineCall              = "inline_call"
+	fixInvertIfCondition       = "invert_if_condition"
+	fixSplitLines              = "split_lines"
+	fixJoinLines               = "join_lines"
+	fixMissingInterfaceMethods = "stub_missing_interface_method"
+	fixMissingCalledFunction   = "stub_missing_called_function"
 )
 
 // ApplyFix applies the specified kind of suggested fix to the given
@@ -98,18 +99,19 @@ func ApplyFix(ctx context.Context, fix string, snapshot *cache.Snapshot, fh file
 		// These match the Diagnostic.Category.
 		embeddirective.FixCategory: addEmbedImport,
 		fillstruct.FixCategory:     singleFile(fillstruct.SuggestedFix),
-		stubmethods.FixCategory:    stubMethodsFixer,
 		undeclaredname.FixCategory: singleFile(undeclaredname.SuggestedFix),
 
 		// Ad-hoc fixers: these are used when the command is
 		// constructed directly by logic in server/code_action.
-		fixExtractFunction:   singleFile(extractFunction),
-		fixExtractMethod:     singleFile(extractMethod),
-		fixExtractVariable:   singleFile(extractVariable),
-		fixInlineCall:        inlineCall,
-		fixInvertIfCondition: singleFile(invertIfCondition),
-		fixSplitLines:        singleFile(splitLines),
-		fixJoinLines:         singleFile(joinLines),
+		fixExtractFunction:         singleFile(extractFunction),
+		fixExtractMethod:           singleFile(extractMethod),
+		fixExtractVariable:         singleFile(extractVariable),
+		fixInlineCall:              inlineCall,
+		fixInvertIfCondition:       singleFile(invertIfCondition),
+		fixSplitLines:              singleFile(splitLines),
+		fixJoinLines:               singleFile(joinLines),
+		fixMissingInterfaceMethods: stubMissingInterfaceMethodsFixer,
+		fixMissingCalledFunction:   stubMissingCalledFunctionFixer,
 	}
 	fixer, ok := fixers[fix]
 	if !ok {

@@ -135,11 +135,6 @@ type BuildOptions struct {
 	// gopls has to do to keep your workspace up to date.
 	ExpandWorkspaceToModule bool `status:"experimental"`
 
-	// AllowImplicitNetworkAccess disables GOPROXY=off, allowing implicit module
-	// downloads rather than requiring user action. This option will eventually
-	// be removed.
-	AllowImplicitNetworkAccess bool `status:"experimental"`
-
 	// StandaloneTags specifies a set of build constraints that identify
 	// individual Go source files that make up the entire main package of an
 	// executable.
@@ -699,6 +694,17 @@ type InternalOptions struct {
 	// dynamically creating build configurations for different modules,
 	// directories, and GOOS/GOARCH combinations to cover open files.
 	ZeroConfig bool
+
+	// PullDiagnostics enables support for pull diagnostics.
+	//
+	// TODO(rfindley): make pull diagnostics robust, and remove this option,
+	// allowing pull diagnostics by default.
+	PullDiagnostics bool
+
+	// AddTestSourceCodeAction enables support for adding test as a source code
+	// action.
+	// TODO(hxjiang): remove this option once the feature is implemented.
+	AddTestSourceCodeAction bool
 }
 
 type SubdirWatchPatterns string
@@ -979,6 +985,8 @@ func (o *Options) setOne(name string, value any) error {
 		return setBool(&o.DeepCompletion, value)
 	case "completeUnimported":
 		return setBool(&o.CompleteUnimported, value)
+	case "addTestSourceCodeAction":
+		return setBool(&o.AddTestSourceCodeAction, value)
 	case "completionBudget":
 		return setDuration(&o.CompletionBudget, value)
 	case "matcher":
@@ -1132,10 +1140,7 @@ func (o *Options) setOne(name string, value any) error {
 		return setBool(&o.AnalysisProgressReporting, value)
 
 	case "allowImplicitNetworkAccess":
-		if err := setBool(&o.AllowImplicitNetworkAccess, value); err != nil {
-			return err
-		}
-		return softErrorf("gopls setting \"allowImplicitNetworkAccess\" is deprecated.\nPlease comment on https://go.dev/issue/66861 if this impacts your workflow.")
+		return deprecatedError("")
 
 	case "standaloneTags":
 		return setStringSlice(&o.StandaloneTags, value)
@@ -1160,6 +1165,9 @@ func (o *Options) setOne(name string, value any) error {
 
 	case "zeroConfig":
 		return setBool(&o.ZeroConfig, value)
+
+	case "pullDiagnostics":
+		return setBool(&o.PullDiagnostics, value)
 
 	// deprecated and renamed settings
 	//

@@ -182,10 +182,10 @@ require golang.org/x/hello v1.2.3
 				if !found {
 					t.Fatalf("found no command with the title %s", commandTitle)
 				}
-				if _, err := env.Editor.ExecuteCommand(env.Ctx, &protocol.ExecuteCommandParams{
+				if err := env.Editor.ExecuteCommand(env.Ctx, &protocol.ExecuteCommandParams{
 					Command:   lens.Command.Command,
 					Arguments: lens.Command.Arguments,
-				}); err != nil {
+				}, nil); err != nil {
 					t.Fatal(err)
 				}
 				env.AfterChange()
@@ -252,7 +252,8 @@ func TestUpgradeCodelens_ModVendor(t *testing.T) {
 	// This test checks the regression of golang/go#66055. The upgrade codelens
 	// should work in a mod vendor context (the test above using a go.work file
 	// was not broken).
-	testenv.NeedsGo1Point(t, 22)
+	testenv.NeedsGoCommand1Point(t, 22)
+
 	const shouldUpdateDep = `
 -- go.mod --
 module mod.com/a

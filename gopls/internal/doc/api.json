@@ -80,19 +80,6 @@
 				"Hierarchy": "build"
 			},
 			{
-				"Name": "allowImplicitNetworkAccess",
-				"Type": "bool",
-				"Doc": "allowImplicitNetworkAccess disables GOPROXY=off, allowing implicit module\ndownloads rather than requiring user action. This option will eventually\nbe removed.\n",
-				"EnumKeys": {
-					"ValueType": "",
-					"Keys": null
-				},
-				"EnumValues": null,
-				"Default": "false",
-				"Status": "experimental",
-				"Hierarchy": "build"
-			},
-			{
 				"Name": "standaloneTags",
 				"Type": "[]string",
 				"Doc": "standaloneTags specifies a set of build constraints that identify\nindividual Go source files that make up the entire main package of an\nexecutable.\n\nA common example of standalone main files is the convention of using the\ndirective `//go:build ignore` to denote files that are not intended to be\nincluded in any package, for example because they are invoked directly by\nthe developer using `go run`.\n\nGopls considers a file to be a standalone main file if and only if it has\npackage name \"main\" and has a build directive of the exact form\n\"//go:build tag\" or \"// +build tag\", where tag is among the list of tags\nconfigured by this setting. Notably, if the build constraint is more\ncomplicated than a simple tag (such as the composite constraint\n`//go:build tag \u0026\u0026 go1.18`), the file is not considered to be a standalone\nmain file.\n\nThis setting is only supported when gopls is built with Go 1.16 or later.\n",
@@ -479,7 +466,7 @@
 						},
 						{
 							"Name": "\"lostcancel\"",
-							"Doc": "check cancel func returned by context.WithCancel is called\n\nThe cancellation function returned by context.WithCancel, WithTimeout,\nand WithDeadline must be called or the new context will remain live\nuntil its parent context is cancelled.\n(The background context is never cancelled.)",
+							"Doc": "check cancel func returned by context.WithCancel is called\n\nThe cancellation function returned by context.WithCancel, WithTimeout,\nWithDeadline and variants such as WithCancelCause must be called,\nor the new context will remain live until its parent context is cancelled.\n(The background context is never cancelled.)",
 							"Default": "true"
 						},
 						{
@@ -565,11 +552,6 @@
 						{
 							"Name": "\"structtag\"",
 							"Doc": "check that struct field tags conform to reflect.StructTag.Get\n\nAlso report certain struct tags (json, xml) used with unexported fields.",
-							"Default": "true"
-						},
-						{
-							"Name": "\"stubmethods\"",
-							"Doc": "detect missing methods and fix with stub implementations\n\nThis analyzer detects type-checking errors due to missing methods\nin assignments from concrete types to interface types, and offers\na suggested fix that will create a set of stub methods so that\nthe concrete type satisfies the interface.\n\nFor example, this function will not compile because the value\nNegativeErr{} does not implement the \"error\" interface:\n\n\tfunc sqrt(x float64) (float64, error) {\n\t\tif x \u003c 0 {\n\t\t\treturn 0, NegativeErr{} // error: missing method\n\t\t}\n\t\t...\n\t}\n\n\ttype NegativeErr struct{}\n\nThis analyzer will suggest a fix to declare this method:\n\n\t// Error implements error.Error.\n\tfunc (NegativeErr) Error() string {\n\t\tpanic(\"unimplemented\")\n\t}\n\n(At least, it appears to behave that way, but technically it\ndoesn't use the SuggestedFix mechanism and the stub is created by\nlogic in gopls's golang.stub function.)",
 							"Default": "true"
 						},
 						{
@@ -1132,7 +1114,7 @@
 		},
 		{
 			"Name": "lostcancel",
-			"Doc": "check cancel func returned by context.WithCancel is called\n\nThe cancellation function returned by context.WithCancel, WithTimeout,\nand WithDeadline must be called or the new context will remain live\nuntil its parent context is cancelled.\n(The background context is never cancelled.)",
+			"Doc": "check cancel func returned by context.WithCancel is called\n\nThe cancellation function returned by context.WithCancel, WithTimeout,\nWithDeadline and variants such as WithCancelCause must be called,\nor the new context will remain live until its parent context is cancelled.\n(The background context is never cancelled.)",
 			"URL": "https://pkg.go.dev/golang.org/x/tools/go/analysis/passes/lostcancel",
 			"Default": true
 		},
@@ -1236,12 +1218,6 @@
 			"Name": "structtag",
 			"Doc": "check that struct field tags conform to reflect.StructTag.Get\n\nAlso report certain struct tags (json, xml) used with unexported fields.",
 			"URL": "https://pkg.go.dev/golang.org/x/tools/go/analysis/passes/structtag",
-			"Default": true
-		},
-		{
-			"Name": "stubmethods",
-			"Doc": "detect missing methods and fix with stub implementations\n\nThis analyzer detects type-checking errors due to missing methods\nin assignments from concrete types to interface types, and offers\na suggested fix that will create a set of stub methods so that\nthe concrete type satisfies the interface.\n\nFor example, this function will not compile because the value\nNegativeErr{} does not implement the \"error\" interface:\n\n\tfunc sqrt(x float64) (float64, error) {\n\t\tif x \u003c 0 {\n\t\t\treturn 0, NegativeErr{} // error: missing method\n\t\t}\n\t\t...\n\t}\n\n\ttype NegativeErr struct{}\n\nThis analyzer will suggest a fix to declare this method:\n\n\t// Error implements error.Error.\n\tfunc (NegativeErr) Error() string {\n\t\tpanic(\"unimplemented\")\n\t}\n\n(At least, it appears to behave that way, but technically it\ndoesn't use the SuggestedFix mechanism and the stub is created by\nlogic in gopls's golang.stub function.)",
-			"URL": "https://pkg.go.dev/golang.org/x/tools/gopls/internal/analysis/stubmethods",
 			"Default": true
 		},
 		{

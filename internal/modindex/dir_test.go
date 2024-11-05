@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/google/go-cmp/cmp"
 )
 
 type id struct {
@@ -37,7 +39,7 @@ var idtests = []id{
 			"cloud.google.com/go@v0.94.0/compute/metadata",
 		},
 	},
-	{ //m test bizarre characters in directory name
+	{ // test bizarre characters in directory name
 		importPath: "bad,guy.com/go",
 		best:       0,
 		dirs:       []string{"bad,guy.com/go@v0.1.0"},
@@ -51,23 +53,132 @@ func testModCache(t *testing.T) string {
 	return dir
 }
 
+// add a trivial package to the test module cache
+func addPkg(cachedir, dir string) error {
+	if err := os.MkdirAll(filepath.Join(cachedir, dir), 0755); err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(cachedir, dir, "foo.go"),
+		[]byte("package foo\nfunc Foo() {}"), 0644)
+}
+
+// update, where new stuff is semantically better than old stuff
+func TestIncremental(t *testing.T) {
+	dir := testModCache(t)
+	// build old index
+	for _, it := range idtests {
+		for i, d := range it.dirs {
+			if it.best == i {
+				continue // wait for second pass
+			}
+			if err := addPkg(dir, d); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if err := Create(dir); err != nil {
+		t.Fatal(err)
+	}
+	// add new stuff to the module cache
+	for _, it := range idtests {
+		for i, d := range it.dirs {
+			if it.best != i {
+				continue // only add the new stuff
+			}
+			if err := addPkg(dir, d); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if ok, err := Update(dir); err != nil {
+		t.Fatal(err)
+	} else if !ok {
+		t.Error("failed to write updated index")
+	}
+	index2, err := ReadIndex(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// build a fresh index
+	if err := Create(dir); err != nil {
+		t.Fatal(err)
+	}
+	index1, err := ReadIndex(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// they should be the same except maybe for the time
+	index1.Changed = index2.Changed
+	if diff := cmp.Diff(index1, index2); diff != "" {
+		t.Errorf("mismatching indexes (-updated +cleared):\n%s", diff)
+	}
+}
+
+// update, where new stuff is semantically worse than some old stuff
+func TestIncrementalNope(t *testing.T) {
+	dir := testModCache(t)
+	// build old index
+	for _, it := range idtests {
+		for i, d := range it.dirs {
+			if i == 0 {
+				continue // wait for second pass
+			}
+			if err := addPkg(dir, d); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if err := Create(dir); err != nil {
+		t.Fatal(err)
+	}
+	// add new stuff to the module cache
+	for _, it := range idtests {
+		for i, d := range it.dirs {
+			if i > 0 {
+				break // only add the new one
+			}
+			if err := addPkg(dir, d); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if ok, err := Update(dir); err != nil {
+		t.Fatal(err)
+	} else if !ok {
+		t.Error("failed to write updated index")
+	}
+	index2, err := ReadIndex(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// build a fresh index
+	if err := Create(dir); err != nil {
+		t.Fatal(err)
+	}
+	index1, err := ReadIndex(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// they should be the same except maybe for the time
+	index1.Changed = index2.Changed
+	if diff := cmp.Diff(index1, index2); diff != "" {
+		t.Errorf("mismatching indexes (-updated +cleared):\n%s", diff)
+	}
+}
+
+// choose the semantically-latest version, with a single symbol
 func TestDirsSinglePath(t *testing.T) {
 	for _, itest := range idtests {
 		t.Run(itest.importPath, func(t *testing.T) {
-			// create a new fake GOMODCACHE
+			// create a new test GOMODCACHE
 			dir := testModCache(t)
 			for _, d := range itest.dirs {
-				if err := os.MkdirAll(filepath.Join(dir, d), 0755); err != nil {
-					t.Fatal(err)
-				}
-				// gopathwalk wants to see .go files
-				err := os.WriteFile(filepath.Join(dir, d, "main.go"), []byte("package main\nfunc main() {}"), 0600)
-				if err != nil {
+				if err := addPkg(dir, d); err != nil {
 					t.Fatal(err)
 				}
 			}
 			// build and check the index
-			if err := IndexModCache(dir, false); err != nil {
+			if err := Create(dir); err != nil {
 				t.Fatal(err)
 			}
 			ix, err := ReadIndex(dir)
@@ -82,6 +193,13 @@ func TestDirsSinglePath(t *testing.T) {
 			}
 			if ix.Entries[0].Dir != Relpath(itest.dirs[itest.best]) {
 				t.Fatalf("got dir %s, wanted %s", ix.Entries[0].Dir, itest.dirs[itest.best])
+			}
+			nms := ix.Entries[0].Names
+			if len(nms) != 1 {
+				t.Fatalf("got %d names, expected 1", len(nms))
+			}
+			if nms[0] != "Foo F 0" {
+				t.Fatalf("got %q, expected Foo F 0", nms[0])
 			}
 		})
 	}

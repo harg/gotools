@@ -52,6 +52,10 @@ import (
 // TODO(adonovan): see if we can wean all clients of this interface.
 type hoverJSON struct {
 	// Synopsis is a single sentence synopsis of the symbol's documentation.
+	//
+	// TODO(adonovan): in what syntax? It (usually) comes from doc.Synopsis,
+	// which produces "Text" form, but it may be fed to
+	// DocCommentToMarkdown, which expects doc comment syntax.
 	Synopsis string `json:"synopsis"`
 
 	// FullDocumentation is the symbol's full documentation.
@@ -1109,6 +1113,10 @@ func chooseDocComment(decl ast.Decl, spec ast.Spec, field *ast.Field) *ast.Comme
 // pos; the resulting File and Pos may belong to the same or a
 // different FileSet, such as one synthesized by the parser cache, if
 // parse-caching is enabled.
+//
+// TODO(adonovan): change this function to accept a filename and a
+// byte offset, and eliminate the confusing (fset, pos) parameters.
+// Then simplify stubmethods.StubInfo, which doesn't need a Fset.
 func parseFull(ctx context.Context, snapshot *cache.Snapshot, fset *token.FileSet, pos token.Pos) (*parsego.File, token.Pos, error) {
 	f := fset.File(pos)
 	if f == nil {
@@ -1314,7 +1322,7 @@ func formatDoc(h *hoverJSON, options *settings.Options) string {
 		doc = h.FullDocumentation
 	}
 	if options.PreferredContentFormat == protocol.Markdown {
-		return CommentToMarkdown(doc, options)
+		return DocCommentToMarkdown(doc, options)
 	}
 	return doc
 }

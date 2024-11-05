@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"go/build"
 	"go/types"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -124,6 +125,7 @@ var testdataTests = []string{
 	"methprom.go",
 	"mrvchain.go",
 	"range.go",
+	"rangeoverint.go",
 	"recover.go",
 	"reflect.go",
 	"slice2arrayptr.go",
@@ -151,11 +153,7 @@ func init() {
 }
 
 func run(t *testing.T, input string, goroot string) {
-	// The recover2 test case is broken on Go 1.14+. See golang/go#34089.
-	// TODO(matloob): Fix this.
-	if filepath.Base(input) == "recover2.go" {
-		t.Skip("The recover2.go test is broken in go1.14+. See golang.org/issue/34089.")
-	}
+	testenv.NeedsExec(t) // really we just need os.Pipe, but os/exec uses pipes
 
 	t.Logf("Input: %s\n", input)
 
@@ -185,10 +183,10 @@ func run(t *testing.T, input string, goroot string) {
 	var hint string
 	defer func() {
 		if hint != "" {
-			fmt.Println("FAIL")
-			fmt.Println(hint)
+			t.Log("FAIL")
+			t.Log(hint)
 		} else {
-			fmt.Println("PASS")
+			t.Log("PASS")
 		}
 
 		interp.CapturedOutput = nil
@@ -218,10 +216,53 @@ func run(t *testing.T, input string, goroot string) {
 		panic("bogus SizesFor")
 	}
 	hint = fmt.Sprintf("To trace execution, run:\n%% go build golang.org/x/tools/cmd/ssadump && ./ssadump -build=C -test -run --interp=T %s\n", input)
+
+	// Capture anything written by the interpreter to os.Std{out,err}
+	// by temporarily redirecting them to a buffer via a pipe.
+	//
+	// While capturing is in effect, we must not write any
+	// test-related stuff to stderr (including log.Print, t.Log, etc).
+	//
+	// Suppress capturing if we are the child process of TestRangeFunc.
+	// TODO(adonovan): simplify that test using this mechanism.
+	// Also eliminate the redundant interp.CapturedOutput mechanism.
+	restore := func() {} // restore files and log the mixed out/err.
+	if os.Getenv("INTERPTEST_CHILD") == "" {
+		// Connect std{out,err} to pipe.
+		r, w, err := os.Pipe()
+		if err != nil {
+			t.Fatalf("can't create pipe for stderr: %v", err)
+		}
+		savedStdout := os.Stdout
+		savedStderr := os.Stderr
+		os.Stdout = w
+		os.Stderr = w
+
+		// Buffer what is written.
+		var buf bytes.Buffer
+		done := make(chan struct{})
+		go func() {
+			if _, err := io.Copy(&buf, r); err != nil {
+				fmt.Fprintf(savedStderr, "io.Copy: %v", err)
+			}
+			close(done)
+		}()
+
+		// Finally, restore the files and log what was captured.
+		restore = func() {
+			os.Stdout = savedStdout
+			os.Stderr = savedStderr
+			w.Close()
+			<-done
+			t.Logf("Interpreter's stdout+stderr:\n%s", &buf)
+		}
+	}
+
 	var imode interp.Mode // default mode
 	// imode |= interp.DisableRecover // enable for debugging
 	// imode |= interp.EnableTracing // enable for debugging
 	exitCode := interp.Interpret(mainPkg, imode, sizes, input, []string{})
+	restore()
 	if exitCode != 0 {
 		t.Fatalf("interpreting %s: exit code was %d", input, exitCode)
 	}
@@ -299,6 +340,8 @@ func TestTestdataFiles(t *testing.T) {
 
 // TestGorootTest runs the interpreter on $GOROOT/test/*.go.
 func TestGorootTest(t *testing.T) {
+	testenv.NeedsGOROOTDir(t, "test")
+
 	goroot := makeGoroot(t)
 	for _, input := range gorootTestTests {
 		t.Run(input, func(t *testing.T) {
@@ -311,6 +354,8 @@ func TestGorootTest(t *testing.T) {
 // in $GOROOT/test/typeparam/*.go.
 
 func TestTypeparamTest(t *testing.T) {
+	testenv.NeedsGOROOTDir(t, "test")
+
 	if runtime.GOARCH == "wasm" {
 		// See ssa/TestTypeparamTest.
 		t.Skip("Consistent flakes on wasm (e.g. https://go.dev/issues/64726)")
